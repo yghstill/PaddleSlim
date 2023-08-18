@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .parallel_linear import QuantizedColumnParallelLinear, QuantizedRowParallelLinear
+from .parallel_linear import QuantizedColumnParallelLinear, QuantizedRowParallelLinear, ShiftScalingRowParallelLinear, QuantizedShiftScalingRowParallelLinear
 
-__all__ = ["QuantizedColumnParallelLinear", "QuantizedRowParallelLinear"]
+__all__ = [
+    "QuantizedColumnParallelLinear", "QuantizedRowParallelLinear",
+    "ShiftScalingRowParallelLinear", "QuantizedShiftScalingRowParallelLinear"
+]

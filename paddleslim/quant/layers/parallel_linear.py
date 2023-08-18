@@ -14,7 +14,8 @@
 
 import paddle
 from paddle.nn import Layer
-from paddle.nn import functional as F
+from paddle import ParamAttr
+from paddle.nn.initializer import Constant
 
 from paddle.nn.quant.format import ConvertibleQuantedLayer
 
@@ -131,6 +132,149 @@ class QuantizedColumnParallelLinear(ConvertibleQuantedLayer):
                 output_parallel, group=self.model_parallel_group)
         else:
             output = output_parallel
+        return output
+
+    def weights_to_quanters(self):
+        return [('weight', 'weight_quanter')]
+
+    def activation_quanters(self):
+        return ['activation_quanter']
+
+
+class ShiftScalingRowParallelLinear(Layer):
+    """
+    The computational logic of ShiftScalingRowParallelLinear is the same as RowParallelLinear.
+    The only difference is that its inputs are shift.
+    """
+
+    def __init__(self, layer: Layer):
+        super().__init__()
+        # For Linear
+        self.weight = layer.weight
+        self.bias = layer.bias
+        self._name = layer._name
+        self.input_is_parallel = layer.input_is_parallel
+        self.is_mp = layer.is_mp
+        self.model_parallel_group = layer.model_parallel_group
+        self.linear = layer.linear
+
+        # For ShiftSmooth
+        shift_shape = self.weight.shape[0]
+        self.shift_weight = self.create_parameter(
+            shape=[shift_shape],
+            attr=ParamAttr(initializer=Constant(value=0.)),
+            dtype=self.weight.dtype)
+        self.smooth_weight = self.create_parameter(
+            shape=[shift_shape],
+            attr=ParamAttr(initializer=Constant(value=1.)),
+            dtype=self.weight.dtype)
+
+    def forward(self, input):
+        shift_input = input
+        shift_input = paddle.add(shift_input, self.shift_weight)
+        smooth_input = paddle.multiply(shift_input, self.smooth_weight)
+        return self._linear_forward(smooth_input, self.weight)
+
+    def convert_weight(self, shift_weight=None, smooth_weight=None):
+        # shift
+        if shift_weight is not None:
+            shift_weight = shift_weight.cast(self.weight.dtype)
+            self.shift_weight.set_value(-shift_weight)
+            shift_linear_bias = paddle.matmul(shift_weight, self.weight)
+            parallel_shift_linear_bias = paddle.distributed.collective._mp_allreduce(
+                shift_linear_bias,
+                group=self.model_parallel_group,
+                use_calc_stream=True,
+                use_model_parallel=True)
+            self.bias.set_value(self.bias + parallel_shift_linear_bias)
+        # smooth
+        if smooth_weight is not None:
+            self.smooth_weight.set_value(
+                1 / smooth_weight.squeeze().cast(self.weight.dtype))
+            self.weight.set_value(
+                self.weight * smooth_weight.transpose(perm=[1, 0]))
+
+    def _linear_forward(self, input, weight):
+        if self.input_is_parallel or (not self.is_mp):
+            input_parallel = input
+        else:
+            # split last dim
+            input_parallel = paddle.distributed.collective._c_split(
+                input, group=self.model_parallel_group)
+
+        if self.is_mp:
+            output_parallel = self.linear(
+                input_parallel, weight, name=self._name)
+            output_ = paddle.distributed.collective._mp_allreduce(
+                output_parallel,
+                group=self.model_parallel_group,
+                use_calc_stream=True,
+                use_model_parallel=True)
+            output = output_ + self.bias if self.bias is not None else output_
+        else:
+            output = self.linear(
+                input_parallel, weight, self.bias, name=self._name)
+        return output
+
+
+class QuantizedShiftScalingRowParallelLinear(ConvertibleQuantedLayer):
+    """
+    The computational logic of ShiftScalingRowParallelLinear is the same as RowParallelLinear.
+    The only difference is that its inputs are shift.
+    """
+
+    def __init__(self, layer: Layer, q_config):
+        super().__init__()
+        # For Linear
+        self.weight = layer.weight
+        self.bias = layer.bias
+        self._name = layer._name
+        self.input_is_parallel = layer.input_is_parallel
+        self.is_mp = layer.is_mp
+        self.model_parallel_group = layer.model_parallel_group
+        self.linear = layer.linear
+        # For Shift-Scaling
+        self.shift_weight = layer.shift_weight
+        self.smooth_weight = layer.smooth_weight
+        # For FakeQuant
+        self.weight_quanter = None
+        self.activation_quanter = None
+        if q_config.weight is not None:
+            self.weight_quanter = q_config.weight._instance(layer)
+        if q_config.activation is not None:
+            self.activation_quanter = q_config.activation._instance(layer)
+
+    def forward(self, input):
+        shift_input = input
+        shift_input = paddle.add(shift_input, self.shift_weight)
+        smooth_input = paddle.multiply(shift_input, self.smooth_weight)
+        # qdq
+        if self.activation_quanter is not None:
+            quant_input = self.activation_quanter(smooth_input)
+        if self.weight_quanter is not None:
+            quant_weight = self.weight_quanter(self.weight)
+        return self._linear_forward(quant_input, quant_weight)
+
+    def _linear_forward(self, input, weight):
+        if self.input_is_parallel or (not self.is_mp):
+            input_parallel = input
+        else:
+            # split last dim
+            input_parallel = paddle.distributed.collective._c_split(
+                input, group=self.model_parallel_group)
+
+        if self.is_mp:
+            output_parallel = self.linear(
+                input_parallel, weight, name=self._name)
+            output_ = paddle.distributed.collective._mp_allreduce(
+                output_parallel,
+                group=self.model_parallel_group,
+                use_calc_stream=True,
+                use_model_parallel=True)
+            output = output_ + self.bias if self.bias is not None else output_
+        else:
+            output = self.linear(
+                input_parallel, weight, self.bias, name=self._name)
         return output
 
     def weights_to_quanters(self):
