@@ -16,23 +16,29 @@ from . import gptq
 from . import smooth
 from . import shift
 from . import piecewise_search
+from . import outlier_supression_plus_search
 from . import sample
 from . import layerwise_quant_error
 from . import utils_layers
+from . import reorder_weight
 
 from .gptq import *
 from .smooth import *
 from .shift import *
 from .piecewise_search import *
+from .outlier_supression_plus_search import *
 from .sample import *
 from .layerwise_quant_error import *
 from .utils_layers import *
+from .reorder_weight import *
 
 __all__ = []
 __all__ += gptq.__all__
 __all__ += smooth.__all__
 __all__ += shift.__all__
 __all__ += piecewise_search.__all__
+__all__ += outlier_supression_plus_search.__all__
 __all__ += sample.__all__
 __all__ += layerwise_quant_error.__all__
 __all__ += utils_layers.__all__
+__all__ += reorder_weight.__all__
